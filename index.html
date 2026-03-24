@@ -39,13 +39,13 @@ const BOOST_DUR = 4000;
 const BOOST_INTERVAL = 20000;
 const BOOST_SPEED = 1.6;
 
-// 대각선 트랙 — 소실점이 오른쪽 위 (더 강한 대각선)
-const VP_X = 650; // 소실점 X (더 오른쪽)
-const VP_Y = 200; // 소실점 Y (더 위)
-const BASE_X = 70;  // 트랙 시작 X (더 왼쪽)
-const BASE_Y = 1100; // 트랙 시작 Y (더 아래)
-const TRACK_W_NEAR = 420; // 가까운 쪽 트랙 폭
-const TRACK_W_FAR = 60; // 먼 쪽 트랙 폭
+// 트랙 — 정면 원근감 + 살짝 대각선 (Antarctic Adventure 스타일)
+const VP_X = 420; // 소실점 X (중앙에서 살짝 오른쪽)
+const VP_Y = 300; // 소실점 Y (화면 위쪽)
+const BASE_X = 300; // 트랙 시작 X (중앙에서 살짝 왼쪽)
+const BASE_Y = 1100; // 트랙 시작 Y
+const TRACK_W_NEAR = 500; // 가까운 쪽 트랙 폭
+const TRACK_W_FAR = 70; // 먼 쪽 트랙 폭
 
 // 난이도
 function getDiff(t){
