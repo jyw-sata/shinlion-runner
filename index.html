@@ -1,0 +1,1033 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>신라이언 러닝 게임</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; overflow:hidden; background:#87CEEB; touch-action:none; }
+canvas { display:block; margin:0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ============================================================
+// 신라이언 러닝 게임 v1.0
+// Antarctic Adventure 스타일 전진형 러닝 액션
+// ============================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// 반응형 캔버스
+function resize() {
+  const ratio = 720 / 1280;
+  let w = window.innerWidth, h = window.innerHeight;
+  if (w / h > ratio) { w = h * ratio; } else { h = w / ratio; }
+  canvas.width = 720; canvas.height = 1280;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ============================================================
+// 게임 상수
+// ============================================================
+const LANE_COUNT = 5;
+const LANE_WIDTH = 100;
+const GAME_DURATION = 120; // 초
+const TRACK_SPEED_BASE = 3;
+const BOOSTER_SPEED = 1.6;
+const BOOSTER_DURATION = 4000; // ms
+const BOOSTER_INTERVAL = 20000; // ms
+const TRAP_DAMAGE = 10;
+const BREAD_HEAL = 5;
+const INVINCIBLE_TIME = 1000; // ms
+const SLIDE_SPEED = 0.15; // 레인 이동 보간
+
+// 난이도 스케일
+function getDifficulty(elapsed) {
+  if (elapsed < 30) return { speed: 1.0, trapRate: 0.012, itemRate: 0.006 };
+  if (elapsed < 60) return { speed: 1.2, trapRate: 0.018, itemRate: 0.005 };
+  if (elapsed < 90) return { speed: 1.4, trapRate: 0.024, itemRate: 0.004 };
+  return { speed: 1.6, trapRate: 0.030, itemRate: 0.004 };
+}
+
+// ============================================================
+// 게임 상태
+// ============================================================
+let state = 'menu'; // menu, playing, gameover, victory
+let energy = 100;
+let score = 0;
+let distance = 0;
+let elapsed = 0;
+let combo = 0;
+let maxCombo = 0;
+let itemCount = 0;
+let currentLane = 2; // 0~4, 중앙
+let targetLane = 2;
+let lanePos = 2; // 부드러운 이동용
+let invincibleUntil = 0;
+let boosterUntil = 0;
+let lastBoosterTime = 0;
+let speedMultiplier = 1;
+let shakeAmount = 0;
+let obstacles = [];
+let particles = [];
+let trackOffset = 0;
+let lastTime = 0;
+let breadEaten = { normal: 0, sparkle: 0 };
+let comboText = '';
+let comboTextTimer = 0;
+let victoryMessages = [
+  "끝까지 포기하지 않으면 반드시 도착할 수 있어!",
+  "꾸준히 나아가면 결국 목표에 닿는다!",
+  "한 걸음씩, 멈추지 않는 것이 가장 빠른 길!"
+];
+let defeatMessages = [
+  "조금 쉬어가도 괜찮아, 다시 도전해보자!",
+  "이번엔 여기까지, 다음엔 더 멀리 갈 수 있어!",
+  "실패는 끝이 아니라 과정이야!",
+  "다시 달리면 더 강해질 수 있어!"
+];
+
+// ============================================================
+// 색상 팔레트
+// ============================================================
+const COLORS = {
+  sky: '#87CEEB',
+  skyBottom: '#E0F0FF',
+  grass: '#4CAF50',
+  grassLight: '#66BB6A',
+  track: '#8B7355',
+  trackLine: '#A0896A',
+  trackEdge: '#6B5335',
+  cherry: '#FFB7C5',
+  tree: '#2E7D32',
+  treeTrunk: '#5D4037',
+};
+
+// ============================================================
+// 입력 처리
+// ============================================================
+let touchStartX = 0;
+
+document.addEventListener('keydown', (e) => {
+  if (state === 'menu') { startGame(); return; }
+  if (state === 'gameover' || state === 'victory') { if (e.key === ' ' || e.key === 'Enter') resetGame(); return; }
+  if (e.key === 'ArrowLeft' || e.key === 'a') moveLane(-1);
+  if (e.key === 'ArrowRight' || e.key === 'd') moveLane(1);
+});
+
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (state === 'menu') { startGame(); return; }
+  if (state === 'gameover' || state === 'victory') { resetGame(); return; }
+  touchStartX = e.touches[0].clientX;
+});
+
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  if (state !== 'playing') return;
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  if (Math.abs(dx) > 30) moveLane(dx > 0 ? 1 : -1);
+});
+
+// 마우스 클릭 (PC)
+canvas.addEventListener('mousedown', (e) => {
+  if (state === 'menu') { startGame(); return; }
+  if (state === 'gameover' || state === 'victory') { resetGame(); return; }
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / rect.width * 720;
+  if (x < 360) moveLane(-1);
+  else moveLane(1);
+});
+
+function moveLane(dir) {
+  targetLane = Math.max(0, Math.min(LANE_COUNT - 1, targetLane + dir));
+}
+
+// ============================================================
+// 게임 시작/리셋
+// ============================================================
+function startGame() {
+  state = 'playing';
+  energy = 100; score = 0; distance = 0; elapsed = 0;
+  combo = 0; maxCombo = 0; itemCount = 0;
+  currentLane = 2; targetLane = 2; lanePos = 2;
+  invincibleUntil = 0; boosterUntil = 0; lastBoosterTime = 0;
+  speedMultiplier = 1; shakeAmount = 0;
+  obstacles = []; particles = [];
+  breadEaten = { normal: 0, sparkle: 0 };
+  lastTime = performance.now();
+}
+
+function resetGame() { state = 'menu'; }
+
+// ============================================================
+// 트랙 좌표 변환 (원근감)
+// ============================================================
+const VANISH_Y = 350; // 소실점 Y
+const VANISH_X = 360; // 소실점 X (화면 중앙)
+const TRACK_BOTTOM_Y = 1100;
+const TRACK_BOTTOM_WIDTH = 600;
+
+function trackToScreen(lane, depth) {
+  // depth: 0(가까이) ~ 1(멀리)
+  const t = depth;
+  const y = TRACK_BOTTOM_Y + (VANISH_Y - TRACK_BOTTOM_Y) * t;
+  const trackW = TRACK_BOTTOM_WIDTH * (1 - t * 0.85);
+  const centerX = VANISH_X;
+  const laneOffset = (lane - 2) / 2; // -1 ~ 1
+  const x = centerX + laneOffset * trackW * 0.4;
+  const scale = 1 - t * 0.8;
+  return { x, y, scale, trackW };
+}
+
+// ============================================================
+// 장애물/아이템 생성
+// ============================================================
+function spawnObstacle(type) {
+  let lane;
+  // 회피 불가 방지: 연속 같은 레인 X
+  const lastSameTrap = obstacles.filter(o => o.type === 'trap' && o.depth < 0.3);
+  const usedLanes = lastSameTrap.map(o => o.lane);
+
+  do {
+    lane = Math.floor(Math.random() * LANE_COUNT);
+  } while (usedLanes.includes(lane) && usedLanes.length < LANE_COUNT - 1);
+
+  const isSparkle = type === 'item' && Math.random() < 0.15;
+
+  obstacles.push({
+    type,
+    lane,
+    depth: 1.1, // 먼 곳에서 시작
+    sparkle: isSparkle,
+  });
+}
+
+// ============================================================
+// 파티클
+// ============================================================
+function addParticle(x, y, color, count = 5) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 6,
+      vy: -Math.random() * 4 - 2,
+      life: 1,
+      color,
+      size: 3 + Math.random() * 4,
+    });
+  }
+}
+
+// ============================================================
+// 업데이트
+// ============================================================
+function update(dt) {
+  if (state !== 'playing') return;
+
+  elapsed += dt;
+  const diff = getDifficulty(elapsed);
+  const now = performance.now();
+
+  // 부스터 체크
+  if (now < boosterUntil) {
+    speedMultiplier = BOOSTER_SPEED;
+  } else {
+    speedMultiplier = diff.speed;
+    // 자동 부스터 (20초마다)
+    if (now - lastBoosterTime > BOOSTER_INTERVAL && elapsed > 5) {
+      activateBooster(now);
+    }
+  }
+
+  const speed = TRACK_SPEED_BASE * speedMultiplier;
+
+  // 레인 부드러운 이동
+  lanePos += (targetLane - lanePos) * SLIDE_SPEED;
+
+  // 거리/점수
+  distance += speed * dt * 10;
+  score += Math.floor(speed * dt * 5);
+
+  // 트랙 스크롤
+  trackOffset = (trackOffset + speed * dt * 50) % 200;
+
+  // 장애물 생성
+  if (Math.random() < diff.trapRate) spawnObstacle('trap');
+  if (Math.random() < diff.itemRate) spawnObstacle('item');
+
+  // 장애물 이동 & 충돌
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const ob = obstacles[i];
+    ob.depth -= speed * dt * 0.012;
+
+    // 충돌 판정 (depth 0.0 ~ 0.08 범위)
+    if (ob.depth < 0.08 && ob.depth > -0.02 && !ob.hit) {
+      const laneDist = Math.abs(ob.lane - Math.round(lanePos));
+      if (laneDist < 0.6) {
+        ob.hit = true;
+        const pos = trackToScreen(ob.lane, Math.max(0, ob.depth));
+
+        if (ob.type === 'trap') {
+          if (now > invincibleUntil) {
+            energy = Math.max(0, energy - TRAP_DAMAGE);
+            invincibleUntil = now + INVINCIBLE_TIME;
+            shakeAmount = 8;
+            combo = 0;
+            addParticle(pos.x, pos.y, '#FF4444', 8);
+            if (energy <= 0) { state = 'gameover'; return; }
+          }
+        } else {
+          // 빵 획득
+          energy = Math.min(100, energy + BREAD_HEAL);
+          itemCount++;
+          combo++;
+          if (combo > maxCombo) maxCombo = combo;
+          score += 50 * combo;
+
+          if (ob.sparkle) {
+            breadEaten.sparkle++;
+            activateBooster(now);
+            addParticle(pos.x, pos.y, '#FFD700', 12);
+          } else {
+            breadEaten.normal++;
+            addParticle(pos.x, pos.y, '#FFB74D', 6);
+          }
+
+          // 콤보 텍스트
+          if (combo >= 20) { comboText = '🔥 AWESOME!'; comboTextTimer = 1.5; }
+          else if (combo >= 10) { comboText = '⭐ GREAT!'; comboTextTimer = 1.2; }
+          else if (combo >= 5) { comboText = '👍 NICE!'; comboTextTimer = 1.0; }
+        }
+      }
+    }
+
+    // 화면 밖 제거
+    if (ob.depth < -0.1) {
+      if (ob.type === 'trap' && !ob.hit) {
+        combo++; // 회피 콤보
+        score += 10;
+      }
+      obstacles.splice(i, 1);
+    }
+  }
+
+  // 파티클 업데이트
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.15;
+    p.life -= dt * 2;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  // 흔들림 감소
+  if (shakeAmount > 0) shakeAmount *= 0.9;
+  if (shakeAmount < 0.1) shakeAmount = 0;
+
+  // 콤보 텍스트 타이머
+  if (comboTextTimer > 0) comboTextTimer -= dt;
+
+  // 승리 조건
+  if (elapsed >= GAME_DURATION) {
+    state = 'victory';
+  }
+}
+
+// ============================================================
+// 부스터 발동
+// ============================================================
+function activateBooster(now) {
+  boosterUntil = now + BOOSTER_DURATION;
+  lastBoosterTime = now;
+  addParticle(360, 900, '#FFD700', 15);
+}
+
+// ============================================================
+// 그리기
+// ============================================================
+function draw() {
+  const now = performance.now();
+  const isBooster = now < boosterUntil;
+  const isInvincible = now < invincibleUntil;
+
+  // 화면 흔들림
+  ctx.save();
+  if (shakeAmount > 0) {
+    ctx.translate(
+      (Math.random() - 0.5) * shakeAmount * 2,
+      (Math.random() - 0.5) * shakeAmount * 2
+    );
+  }
+
+  // --- 배경: 하늘 ---
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, VANISH_Y + 100);
+  skyGrad.addColorStop(0, isBooster ? '#FF9800' : '#87CEEB');
+  skyGrad.addColorStop(1, isBooster ? '#FFE0B2' : '#E8F5E9');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, 720, VANISH_Y + 100);
+
+  // --- 배경: 산/언덕 ---
+  drawHills();
+
+  // --- 배경: 벚꽃 나무 ---
+  drawTrees();
+
+  // --- 트랙 그리기 ---
+  drawTrack(isBooster);
+
+  // --- 장애물/아이템 그리기 (뒤에서 앞 순서) ---
+  const sorted = [...obstacles].sort((a, b) => b.depth - a.depth);
+  for (const ob of sorted) {
+    if (ob.depth < 0 || ob.depth > 1) continue;
+    drawObstacle(ob);
+  }
+
+  // --- 캐릭터 ---
+  drawCharacter(isBooster, isInvincible);
+
+  // --- 부스터 속도선 ---
+  if (isBooster) drawSpeedLines();
+
+  // --- 파티클 ---
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.restore(); // 흔들림 복원
+
+  // --- UI (흔들림 영향 안 받게) ---
+  drawUI();
+
+  // 콤보 텍스트
+  if (comboTextTimer > 0) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, comboTextTimer);
+    ctx.font = 'bold 48px sans-serif';
+    ctx.fillStyle = '#FFD700';
+    ctx.strokeStyle = '#8B4513';
+    ctx.lineWidth = 4;
+    ctx.textAlign = 'center';
+    ctx.strokeText(comboText, 360, 500);
+    ctx.fillText(comboText, 360, 500);
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// 배경 그리기
+// ============================================================
+function drawHills() {
+  // 뒤쪽 산
+  ctx.fillStyle = '#81C784';
+  ctx.beginPath();
+  ctx.moveTo(0, VANISH_Y + 60);
+  ctx.quadraticCurveTo(180, VANISH_Y - 30, 360, VANISH_Y + 40);
+  ctx.quadraticCurveTo(540, VANISH_Y - 10, 720, VANISH_Y + 50);
+  ctx.lineTo(720, VANISH_Y + 100);
+  ctx.lineTo(0, VANISH_Y + 100);
+  ctx.fill();
+
+  // 앞쪽 언덕
+  ctx.fillStyle = '#66BB6A';
+  ctx.beginPath();
+  ctx.moveTo(0, VANISH_Y + 80);
+  ctx.quadraticCurveTo(200, VANISH_Y + 30, 400, VANISH_Y + 70);
+  ctx.quadraticCurveTo(600, VANISH_Y + 50, 720, VANISH_Y + 90);
+  ctx.lineTo(720, TRACK_BOTTOM_Y + 200);
+  ctx.lineTo(0, TRACK_BOTTOM_Y + 200);
+  ctx.fill();
+}
+
+function drawTrees() {
+  // 트랙 양쪽 벚꽃 나무
+  const treePositions = [
+    { x: 80, y: VANISH_Y + 40, s: 0.7 },
+    { x: 640, y: VANISH_Y + 35, s: 0.65 },
+    { x: 50, y: VANISH_Y + 100, s: 1.0 },
+    { x: 670, y: VANISH_Y + 95, s: 0.9 },
+    { x: 30, y: VANISH_Y + 180, s: 1.3 },
+    { x: 690, y: VANISH_Y + 175, s: 1.2 },
+  ];
+
+  for (const t of treePositions) {
+    // 나무 줄기
+    ctx.fillStyle = '#5D4037';
+    ctx.fillRect(t.x - 4 * t.s, t.y - 20 * t.s, 8 * t.s, 40 * t.s);
+    // 벚꽃 잎
+    ctx.fillStyle = '#F8BBD0';
+    ctx.beginPath();
+    ctx.arc(t.x, t.y - 25 * t.s, 20 * t.s, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#FFB7C5';
+    ctx.beginPath();
+    ctx.arc(t.x - 10 * t.s, t.y - 18 * t.s, 14 * t.s, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(t.x + 10 * t.s, t.y - 18 * t.s, 14 * t.s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// ============================================================
+// 트랙 그리기 (원근감)
+// ============================================================
+function drawTrack(isBooster) {
+  const steps = 40;
+  for (let i = 0; i < steps; i++) {
+    const d1 = i / steps;
+    const d2 = (i + 1) / steps;
+    const p1 = trackToScreen(2, d1);
+    const p2 = trackToScreen(2, d2);
+    const w1 = p1.trackW * 0.5;
+    const w2 = p2.trackW * 0.5;
+
+    // 트랙 바닥
+    const trackColor = isBooster ? '#B8860B' : '#8B7355';
+    ctx.fillStyle = trackColor;
+    ctx.beginPath();
+    ctx.moveTo(p1.x - w1, p1.y);
+    ctx.lineTo(p2.x - w2, p2.y);
+    ctx.lineTo(p2.x + w2, p2.y);
+    ctx.lineTo(p1.x + w1, p1.y);
+    ctx.fill();
+
+    // 레인 구분선
+    if (i % 2 === 0) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.lineWidth = p1.scale;
+      for (let lane = 1; lane < LANE_COUNT; lane++) {
+        const lp1 = trackToScreen(lane, d1);
+        const lp2 = trackToScreen(lane, d2);
+        // 레인 사이 점선
+        const lx1 = p1.x + (lane - 2) / 2 * w1 * 0.8;
+        const lx2 = p2.x + (lane - 2) / 2 * w2 * 0.8;
+        ctx.beginPath();
+        ctx.moveTo(lx1, p1.y);
+        ctx.lineTo(lx2, p2.y);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // 트랙 가장자리 라인
+  ctx.strokeStyle = '#5D4037';
+  ctx.lineWidth = 3;
+  const farLeft = trackToScreen(0, 1);
+  const nearLeft = trackToScreen(0, 0);
+  const farRight = trackToScreen(4, 1);
+  const nearRight = trackToScreen(4, 0);
+  ctx.beginPath();
+  ctx.moveTo(nearLeft.x - nearLeft.trackW * 0.24, nearLeft.y);
+  ctx.lineTo(farLeft.x - farLeft.trackW * 0.24, farLeft.y);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(nearRight.x + nearRight.trackW * 0.24, nearRight.y);
+  ctx.lineTo(farRight.x + farRight.trackW * 0.24, farRight.y);
+  ctx.stroke();
+}
+
+// ============================================================
+// 장애물/아이템 그리기
+// ============================================================
+function drawObstacle(ob) {
+  const pos = trackToScreen(ob.lane, ob.depth);
+  const s = pos.scale * 1.2;
+  if (s < 0.05) return;
+
+  ctx.save();
+  ctx.translate(pos.x, pos.y);
+  ctx.scale(s, s);
+
+  if (ob.type === 'trap') {
+    // 함정: 구덩이/바위
+    ctx.fillStyle = '#555';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 30, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // 뾰족한 바위
+    ctx.fillStyle = '#777';
+    ctx.beginPath();
+    ctx.moveTo(-15, 0); ctx.lineTo(-5, -25); ctx.lineTo(5, 0);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(0, 0); ctx.lineTo(10, -20); ctx.lineTo(18, 0);
+    ctx.fill();
+    // 경고 표시
+    ctx.fillStyle = '#FF4444';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('⚠', 0, -30);
+  } else {
+    // 빵 아이템
+    if (ob.sparkle) {
+      // 빤짝이 빵
+      const glow = ctx.createRadialGradient(0, -10, 5, 0, -10, 25);
+      glow.addColorStop(0, 'rgba(255,215,0,0.6)');
+      glow.addColorStop(1, 'rgba(255,215,0,0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(0, -10, 25, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#FFD700';
+      ctx.font = '32px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('⭐', 0, 0);
+    } else {
+      // 일반 빵 (소금빵 모양)
+      ctx.fillStyle = '#D4A054';
+      ctx.beginPath();
+      ctx.ellipse(0, -5, 18, 12, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#E8B866';
+      ctx.beginPath();
+      ctx.ellipse(0, -8, 14, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // 빵 디테일
+      ctx.strokeStyle = '#C49040';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-8, -8); ctx.quadraticCurveTo(0, -14, 8, -8);
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+// ============================================================
+// 캐릭터 (신라이언) 그리기
+// ============================================================
+function drawCharacter(isBooster, isInvincible) {
+  const pos = trackToScreen(lanePos, 0.05);
+  const cx = pos.x;
+  const cy = pos.y - 30;
+  const s = 1.0;
+  const now = performance.now();
+
+  // 무적일 때 깜빡임
+  if (isInvincible && Math.floor(now / 100) % 2 === 0) return;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(s, s);
+
+  // 이동 시 기울임
+  const tilt = (targetLane - lanePos) * 0.15;
+  ctx.rotate(tilt);
+
+  // 달리기 애니메이션 (팔다리 흔들기)
+  const runCycle = Math.sin(now / 100) * 8;
+  const armSwing = Math.sin(now / 100) * 15;
+
+  // --- 몸체 ---
+  // 그림자
+  ctx.fillStyle = 'rgba(0,0,0,0.15)';
+  ctx.beginPath();
+  ctx.ellipse(0, 40, 25, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 다리 (뒤)
+  ctx.fillStyle = '#C49040';
+  ctx.fillRect(-12, 20 + runCycle, 10, 20);
+  ctx.fillRect(2, 20 - runCycle, 10, 20);
+
+  // 몸통 (둥근 타원)
+  ctx.fillStyle = '#E8B866';
+  ctx.beginPath();
+  ctx.ellipse(0, 5, 28, 25, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 배 (밝은 부분)
+  ctx.fillStyle = '#F5DEB3';
+  ctx.beginPath();
+  ctx.ellipse(0, 10, 18, 16, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 팔 (부스터일 때 뒤로)
+  ctx.fillStyle = '#D4A054';
+  if (isBooster) {
+    // 팔 뒤로 (질주)
+    ctx.fillRect(-30, 0, 12, 8);
+    ctx.fillRect(18, 0, 12, 8);
+  } else {
+    // 팔 흔들기
+    ctx.save();
+    ctx.translate(-25, 0);
+    ctx.rotate(armSwing * Math.PI / 180);
+    ctx.fillRect(0, -4, 10, 16);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(15, 0);
+    ctx.rotate(-armSwing * Math.PI / 180);
+    ctx.fillRect(0, -4, 10, 16);
+    ctx.restore();
+  }
+
+  // --- 머리 ---
+  // 머리 (둥근 원)
+  ctx.fillStyle = '#E8B866';
+  ctx.beginPath();
+  ctx.arc(0, -22, 22, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 갈기 (사자 느낌)
+  ctx.fillStyle = '#D4A054';
+  ctx.beginPath();
+  ctx.arc(0, -24, 26, Math.PI * 0.8, Math.PI * 2.2);
+  ctx.fill();
+
+  // 귀
+  ctx.fillStyle = '#D4A054';
+  ctx.beginPath();
+  ctx.arc(-16, -38, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(16, -38, 8, 0, Math.PI * 2);
+  ctx.fill();
+  // 귀 안쪽
+  ctx.fillStyle = '#FFB7C5';
+  ctx.beginPath();
+  ctx.arc(-16, -38, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(16, -38, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 얼굴
+  // 눈
+  ctx.fillStyle = '#333';
+  ctx.beginPath();
+  ctx.arc(-8, -24, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(8, -24, 4, 0, Math.PI * 2);
+  ctx.fill();
+  // 눈 하이라이트
+  ctx.fillStyle = '#FFF';
+  ctx.beginPath();
+  ctx.arc(-6, -26, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(10, -26, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 코
+  ctx.fillStyle = '#333';
+  ctx.beginPath();
+  ctx.ellipse(0, -18, 4, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 입 (부스터일 때 씩 웃기)
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (isBooster) {
+    ctx.arc(0, -14, 6, 0, Math.PI);
+  } else {
+    ctx.arc(0, -16, 4, 0.1, Math.PI - 0.1);
+  }
+  ctx.stroke();
+
+  // 볼 홍조
+  ctx.fillStyle = 'rgba(255,150,150,0.4)';
+  ctx.beginPath();
+  ctx.arc(-14, -18, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(14, -18, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// ============================================================
+// 속도선 (부스터)
+// ============================================================
+function drawSpeedLines() {
+  ctx.strokeStyle = 'rgba(255,200,0,0.3)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 8; i++) {
+    const x = Math.random() * 720;
+    const y = 400 + Math.random() * 600;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x - 10, y + 80 + Math.random() * 40);
+    ctx.stroke();
+  }
+}
+
+// ============================================================
+// UI 그리기
+// ============================================================
+function drawUI() {
+  if (state !== 'playing') return;
+
+  // 상단 패널
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, 720, 100);
+
+  // 에너지 바
+  ctx.fillStyle = '#333';
+  ctx.fillRect(20, 15, 300, 25);
+  const energyColor = energy > 50 ? '#4CAF50' : energy > 25 ? '#FF9800' : '#F44336';
+  ctx.fillStyle = energyColor;
+  ctx.fillRect(22, 17, 296 * (energy / 100), 21);
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(20, 15, 300, 25);
+  // 에너지 텍스트
+  ctx.font = 'bold 14px sans-serif';
+  ctx.fillStyle = '#FFF';
+  ctx.textAlign = 'center';
+  ctx.fillText(`에너지 ${Math.ceil(energy)}%`, 170, 33);
+
+  // 점수
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillStyle = '#FFD700';
+  ctx.textAlign = 'right';
+  ctx.fillText(`점수: ${score}`, 700, 30);
+
+  // 거리
+  ctx.font = '16px sans-serif';
+  ctx.fillStyle = '#FFF';
+  ctx.fillText(`${Math.floor(distance)}m`, 700, 55);
+
+  // 시간
+  const remaining = Math.max(0, Math.ceil(GAME_DURATION - elapsed));
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillStyle = remaining <= 10 ? '#F44336' : '#FFF';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${remaining}초`, 360, 35);
+
+  // 콤보
+  if (combo >= 3) {
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'left';
+    ctx.fillText(`콤보 x${combo}`, 20, 70);
+  }
+
+  // 아이템 수
+  ctx.font = '14px sans-serif';
+  ctx.fillStyle = '#FFB74D';
+  ctx.textAlign = 'left';
+  ctx.fillText(`🍞 ${itemCount}`, 20, 90);
+
+  // 부스터 게이지
+  const now = performance.now();
+  if (now < boosterUntil) {
+    const remaining2 = (boosterUntil - now) / BOOSTER_DURATION;
+    ctx.fillStyle = 'rgba(255,215,0,0.3)';
+    ctx.fillRect(340, 50, 180, 12);
+    ctx.fillStyle = '#FFD700';
+    ctx.fillRect(340, 50, 180 * remaining2, 12);
+    ctx.font = '11px sans-serif';
+    ctx.fillStyle = '#FFD700';
+    ctx.textAlign = 'center';
+    ctx.fillText('BOOST!', 430, 61);
+  }
+}
+
+// ============================================================
+// 메뉴/게임오버/승리 화면
+// ============================================================
+function drawMenu() {
+  // 배경
+  const grad = ctx.createLinearGradient(0, 0, 0, 1280);
+  grad.addColorStop(0, '#87CEEB');
+  grad.addColorStop(0.5, '#E8F5E9');
+  grad.addColorStop(1, '#4CAF50');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 720, 1280);
+
+  drawHills();
+  drawTrees();
+
+  // 타이틀
+  ctx.font = 'bold 56px sans-serif';
+  ctx.fillStyle = '#5D4037';
+  ctx.strokeStyle = '#FFF';
+  ctx.lineWidth = 4;
+  ctx.textAlign = 'center';
+  ctx.strokeText('🦁 신라이언', 360, 300);
+  ctx.fillText('🦁 신라이언', 360, 300);
+  ctx.font = 'bold 48px sans-serif';
+  ctx.strokeText('러닝 게임', 360, 370);
+  ctx.fillText('러닝 게임', 360, 370);
+
+  // 캐릭터 미리보기
+  ctx.save();
+  ctx.translate(360, 580);
+  ctx.scale(2.5, 2.5);
+  drawCharacterStatic();
+  ctx.restore();
+
+  // 시작 버튼
+  const pulse = Math.sin(performance.now() / 400) * 3;
+  ctx.fillStyle = '#E8B866';
+  ctx.strokeStyle = '#8B6914';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.roundRect(240, 800 + pulse, 240, 70, 20);
+  ctx.fill();
+  ctx.stroke();
+  ctx.font = 'bold 30px sans-serif';
+  ctx.fillStyle = '#5D4037';
+  ctx.fillText('▶ 시작', 360, 845 + pulse);
+
+  // 조작법
+  ctx.font = '16px sans-serif';
+  ctx.fillStyle = '#5D4037';
+  ctx.fillText('좌우 스와이프 / 화면 탭으로 이동', 360, 940);
+  ctx.fillText('PC: ← → 키 또는 화면 좌우 클릭', 360, 965);
+  ctx.font = '14px sans-serif';
+  ctx.fillStyle = '#888';
+  ctx.fillText('120초 생존하면 승리!', 360, 1000);
+  ctx.fillText('함정을 피하고 빵을 먹어 에너지를 채우세요!', 360, 1025);
+}
+
+function drawCharacterStatic() {
+  // 간단한 정적 캐릭터
+  ctx.fillStyle = '#E8B866';
+  ctx.beginPath(); ctx.ellipse(0, 5, 28, 25, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#F5DEB3';
+  ctx.beginPath(); ctx.ellipse(0, 10, 18, 16, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#E8B866';
+  ctx.beginPath(); ctx.arc(0, -22, 22, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#D4A054';
+  ctx.beginPath(); ctx.arc(0, -24, 26, Math.PI * 0.8, Math.PI * 2.2); ctx.fill();
+  ctx.fillStyle = '#D4A054';
+  ctx.beginPath(); ctx.arc(-16, -38, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(16, -38, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#FFB7C5';
+  ctx.beginPath(); ctx.arc(-16, -38, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(16, -38, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#333';
+  ctx.beginPath(); ctx.arc(-8, -24, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(8, -24, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#FFF';
+  ctx.beginPath(); ctx.arc(-6, -26, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(10, -26, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#333';
+  ctx.beginPath(); ctx.ellipse(0, -18, 4, 3, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0, -14, 6, 0, Math.PI); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,150,150,0.4)';
+  ctx.beginPath(); ctx.arc(-14, -18, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(14, -18, 5, 0, Math.PI * 2); ctx.fill();
+  // 다리
+  ctx.fillStyle = '#C49040';
+  ctx.fillRect(-12, 25, 10, 18);
+  ctx.fillRect(2, 25, 10, 18);
+}
+
+function drawEndScreen() {
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, 720, 1280);
+
+  ctx.textAlign = 'center';
+
+  if (state === 'victory') {
+    ctx.font = 'bold 52px sans-serif';
+    ctx.fillStyle = '#FFD700';
+    ctx.fillText('🎉 클리어! 🎉', 360, 300);
+
+    ctx.font = '22px sans-serif';
+    ctx.fillStyle = '#FFF';
+    const msg = victoryMessages[Math.floor(Math.random() * victoryMessages.length)];
+    // 줄바꿈 처리
+    wrapText(msg, 360, 380, 600, 28);
+  } else {
+    ctx.font = 'bold 52px sans-serif';
+    ctx.fillStyle = '#F44336';
+    ctx.fillText('💔 게임 오버', 360, 300);
+
+    ctx.font = '22px sans-serif';
+    ctx.fillStyle = '#FFF';
+    const msg = defeatMessages[Math.floor(Math.random() * defeatMessages.length)];
+    wrapText(msg, 360, 380, 600, 28);
+  }
+
+  // 결과
+  ctx.font = '20px sans-serif';
+  ctx.fillStyle = '#CCC';
+  const stats = [
+    `점수: ${score}`,
+    `거리: ${Math.floor(distance)}m`,
+    `생존: ${Math.floor(elapsed)}초`,
+    `빵 획득: ${itemCount}개`,
+    `최대 콤보: ${maxCombo}`,
+  ];
+  stats.forEach((s, i) => ctx.fillText(s, 360, 480 + i * 35));
+
+  // 재시작 버튼
+  const pulse = Math.sin(performance.now() / 400) * 3;
+  ctx.fillStyle = '#E8B866';
+  ctx.strokeStyle = '#8B6914';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(240, 720 + pulse, 240, 60, 16);
+  ctx.fill();
+  ctx.stroke();
+  ctx.font = 'bold 26px sans-serif';
+  ctx.fillStyle = '#5D4037';
+  ctx.fillText('다시 도전', 360, 758 + pulse);
+}
+
+function wrapText(text, x, y, maxWidth, lineHeight) {
+  const chars = text.split('');
+  let line = '';
+  let currentY = y;
+  for (const ch of chars) {
+    const test = line + ch;
+    if (ctx.measureText(test).width > maxWidth) {
+      ctx.fillText(line, x, currentY);
+      line = ch;
+      currentY += lineHeight;
+    } else {
+      line = test;
+    }
+  }
+  ctx.fillText(line, x, currentY);
+}
+
+// ============================================================
+// 메인 루프
+// ============================================================
+function gameLoop(time) {
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+
+  if (state === 'menu') {
+    drawMenu();
+  } else if (state === 'playing') {
+    update(dt);
+    draw();
+  } else {
+    draw();
+    drawEndScreen();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+lastTime = performance.now();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
